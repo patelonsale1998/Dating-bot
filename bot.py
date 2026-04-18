@@ -4,7 +4,7 @@ import math
 import random
 
 # ===== CONFIG =====
-TOKEN = "8450433036:AAGi-KlbtUinR9-sOIEhsD0UgBPvbZjiW4o"
+TOKEN = "8450433036:AAFmuzOeD1NzN5hdQM7puEzDq9Om7ihJ3bk"
 ADMIN_ID = 123456789#
 URL = f"https://api.telegram.org/bot{TOKEN}/"
 
