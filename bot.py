@@ -1,13 +1,27 @@
 import requests
 import time
+import sqlite3
 
-# ===== CONFIG =====
 TOKEN = "8450433036:AAFmuzOeD1NzN5hdQM7puEzDq9Om7ihJ3bk"
 ADMIN_ID = 123456789
 URL = f"https://api.telegram.org/bot{TOKEN}/"
 
-# ===== STORAGE =====
-users = {}
+# ===== DB SETUP =====
+conn = sqlite3.connect("bot.db", check_same_thread=False)
+cur = conn.cursor()
+
+cur.execute("""
+CREATE TABLE IF NOT EXISTS users (
+id INTEGER PRIMARY KEY,
+gender TEXT,
+age TEXT,
+city TEXT,
+photo TEXT
+)
+""")
+conn.commit()
+
+# ===== ACTIVE MEMORY =====
 queue_male = []
 queue_female = []
 active = {}
@@ -23,28 +37,48 @@ def send_photo(chat_id, photo, caption):
         "caption": caption
     })
 
-# ===== GET UPDATES =====
 def get_updates(offset=None):
     return requests.get(URL + "getUpdates", params={"timeout": 100, "offset": offset}).json()
 
-# ===== MATCH SYSTEM =====
-def match(user_id):
-    u = users[user_id]
-    queue = queue_female if u["gender"] == "male" else queue_male
+# ===== DB HELPERS =====
+def save_user(uid, field, value):
+    cur.execute("SELECT id FROM users WHERE id=?", (uid,))
+    if cur.fetchone():
+        cur.execute(f"UPDATE users SET {field}=? WHERE id=?", (value, uid))
+    else:
+        cur.execute("INSERT INTO users (id, {0}) VALUES (?, ?)".format(field), (uid, value))
+    conn.commit()
+
+def get_user(uid):
+    cur.execute("SELECT * FROM users WHERE id=?", (uid,))
+    return cur.fetchone()
+
+# ===== MATCH =====
+def match(uid, gender):
+    queue = queue_female if gender == "male" else queue_male
 
     if queue:
         partner = queue.pop(0)
+        active[uid] = partner
+        active[partner] = uid
 
-        active[user_id] = partner
-        active[partner] = user_id
-
-        send(user_id, "❤️ Matched!")
+        send(uid, "❤️ Matched!")
         send(partner, "❤️ Matched!")
     else:
-        queue.append(user_id)
-        send(user_id, "🔎 Searching partner...")
+        queue.append(uid)
+        send(uid, "🔎 Searching...")
 
-# ===== HANDLE =====
+# ===== ADMIN DASHBOARD =====
+def admin_panel(chat_id):
+    send(chat_id, """
+👑 ADMIN PANEL
+
+/users - total users
+/active - active chats
+/broadcast msg - send msg to all
+""")
+
+# ===== LOOP =====
 def handle(update):
     m = update.get("message")
     if not m:
@@ -56,43 +90,55 @@ def handle(update):
     # ===== ADMIN =====
     if chat_id == ADMIN_ID:
         if text == "/admin":
-            send(chat_id, "/users /active /stats")
+            admin_panel(chat_id)
             return
 
         if text == "/users":
-            send(chat_id, str(users))
+            cur.execute("SELECT COUNT(*) FROM users")
+            send(chat_id, str(cur.fetchone()[0]))
             return
 
         if text == "/active":
             send(chat_id, str(active))
             return
 
-        if text == "/stats":
-            send(chat_id, f"Users: {len(users)}")
+        if text.startswith("/broadcast"):
+            msg = text.replace("/broadcast", "")
+            cur.execute("SELECT id FROM users")
+            for u in cur.fetchall():
+                send(u[0], msg)
             return
 
     # ===== START =====
     if text == "/start":
-        users[chat_id] = {
-            "state": "gender",
-            "name": m["from"].get("first_name")
-        }
         send(chat_id, "👤 Male or Female?")
+        save_user(chat_id, "gender", "")
         return
 
-    # ===== PROFILE CARD =====
-    if text == "/profile":
-        u = users.get(chat_id, {})
-        caption = f"""
-👤 {u.get('name')}
-🎂 {u.get('age')}
-🏙 {u.get('city')}
-⚧ {u.get('gender')}
-"""
-        if u.get("photo"):
-            send_photo(chat_id, u["photo"], caption)
-        else:
-            send(chat_id, caption)
+    # ===== PROFILE FLOW =====
+    user = get_user(chat_id)
+
+    if user and not user[1]:
+        save_user(chat_id, "gender", text.lower())
+        send(chat_id, "🎂 Age?")
+        return
+
+    if user and not user[2]:
+        save_user(chat_id, "age", text)
+        send(chat_id, "🏙 City?")
+        return
+
+    if user and not user[3]:
+        save_user(chat_id, "city", text)
+        send(chat_id, "📸 Send photo")
+        return
+
+    if "photo" in m:
+        photo = m["photo"][-1]["file_id"]
+        save_user(chat_id, "photo", photo)
+
+        gender = user[1]
+        match(chat_id, gender)
         return
 
     # ===== CHAT =====
@@ -100,40 +146,7 @@ def handle(update):
         send(active[chat_id], text)
         return
 
-    if chat_id not in users:
-        return
-
-    state = users[chat_id]["state"]
-
-    # ===== GENDER =====
-    if state == "gender":
-        users[chat_id]["gender"] = text.lower()
-        users[chat_id]["state"] = "age"
-        send(chat_id, "🎂 Enter age")
-        return
-
-    # ===== AGE =====
-    if state == "age":
-        users[chat_id]["age"] = text
-        users[chat_id]["state"] = "city"
-        send(chat_id, "🏙 Enter city")
-        return
-
-    # ===== CITY =====
-    if state == "city":
-        users[chat_id]["city"] = text
-        users[chat_id]["state"] = "photo"
-        send(chat_id, "📸 Send photo")
-        return
-
-    # ===== PHOTO =====
-    if "photo" in m and state == "photo":
-        users[chat_id]["photo"] = m["photo"][-1]["file_id"]
-        users[chat_id]["state"] = "done"
-        match(chat_id)
-        return
-
-# ===== LOOP =====
+# ===== RUN =====
 offset = None
 while True:
     data = get_updates(offset)
